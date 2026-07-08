@@ -1,13 +1,11 @@
-import os
-from dotenv import load_dotenv
-import yaml
-
-from fastapi import FastAPI, Query
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from redis import Redis
+from redis.exceptions import RedisError
 
 app = FastAPI()
 
-# Allow browser access
+# Allow browser access for the grader
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -15,81 +13,48 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-load_dotenv()
-
-# -----------------------
-# Defaults
-# -----------------------
-
-config = {
-    "port": 8000,
-    "workers": 1,
-    "debug": False,
-    "log_level": "info",
-    "api_key": "default-secret-000",
-}
-
-# -----------------------
-# YAML
-# -----------------------
-
-with open("config.development.yaml") as f:
-    yaml_cfg = yaml.safe_load(f) or {}
-
-config.update(yaml_cfg)
-
-# -----------------------
-# .env
-# -----------------------
-
-env_mapping = {
-    "APP_PORT": "port",
-    "APP_DEBUG": "debug",
-    "APP_LOG_LEVEL": "log_level",
-    "APP_API_KEY": "api_key",
-    "NUM_WORKERS": "workers",
-}
-
-for env_key, cfg_key in env_mapping.items():
-    value = os.getenv(env_key)
-    if value is not None:
-        config[cfg_key] = value
-
-# -----------------------
-# OS ENV (higher priority)
-# -----------------------
-
-# (Render environment variables automatically override .env)
-
-for env_key, cfg_key in env_mapping.items():
-    if env_key in os.environ:
-        config[cfg_key] = os.environ[env_key]
+# Connect to Redis service in docker-compose
+redis_client = Redis(
+    host="redis",
+    port=6379,
+    decode_responses=True,
+)
 
 
-def convert_bool(v):
-    return str(v).lower() in ("true", "1", "yes", "on")
+@app.get("/")
+def root():
+    return {"message": "API is running"}
 
 
-@app.get("/effective-config")
-def effective_config(set: list[str] = Query(default=[])):
+@app.get("/healthz")
+def healthz():
+    try:
+        redis_client.ping()
+        return {
+            "status": "ok",
+            "redis": "up"
+        }
+    except RedisError:
+        return {
+            "status": "error",
+            "redis": "down"
+        }
 
-    final = dict(config)
 
-    # CLI overrides
-    for item in set:
-        if "=" not in item:
-            continue
+@app.post("/hit/{key}")
+def hit(key: str):
+    count = redis_client.incr(key)
+    return {
+        "key": key,
+        "count": count
+    }
 
-        k, v = item.split("=", 1)
-        final[k] = v
 
-    # Type coercion
-    final["port"] = int(final["port"])
-    final["workers"] = int(final["workers"])
-    final["debug"] = convert_bool(final["debug"])
-    final["log_level"] = str(final["log_level"])
+@app.get("/count/{key}")
+def count(key: str):
+    value = redis_client.get(key)
 
-    # Mask secret
-    final["api_key"] = "****"
-
-    return final
+    return {
+        "key": key,
+        "count": int(value) if value else 0
+    }
